@@ -1,28 +1,30 @@
 import aiosqlite
 import asyncio
+import os
+import stat
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from aiogram.client.default import DefaultBotProperties
 
 # Состояния для анкеты
 class ProfileStates(StatesGroup):
     waiting_name = State()
+    waiting_role = State()
     waiting_age = State()
     waiting_city = State()
     waiting_bio = State()
     waiting_photo = State()
 
 # Токен бота
-BOT_TOKEN = "8590470502:AAE-MkOEeRhB7xNn8b96mBdpCs9kJ4rWDE4"
+BOT_TOKEN = "8590470502:AAGAEetWI7vkHI9LxF8NVbJSYTTusFn4LDE"
 
-# ID администратора (замените на ваш Telegram ID)
-ADMIN_ID = 7788088499  # Замените на ваш реальный ID
+# ID администратора
+ADMIN_ID = 7788088499
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -47,23 +49,29 @@ cancel_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+# Проверка прав доступа к БД
+async def ensure_db_permissions():
+    if os.path.exists('flood.db'):
+        os.chmod('flood.db', stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP)
+        print("✅ Права доступа к БД установлены")
+
 # Инициализация базы данных
 async def init_db():
     global db
-    db = await aiosqlite.connect('flood.db')
+    await ensure_db_permissions()
     
-    # Настройки для лучшей производительности
+    db = await aiosqlite.connect('flood.db')
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
     await db.execute("PRAGMA synchronous=NORMAL")
     
-    # Создаем таблицу
     await db.execute("""
         CREATE TABLE IF NOT EXISTS flood (
             users_id INTEGER PRIMARY KEY,
             full_name TEXT,
             username TEXT,
             name TEXT NOT NULL,
+            role TEXT NOT NULL,
             age INTEGER NOT NULL,
             city TEXT NOT NULL,
             bio TEXT NOT NULL,
@@ -75,27 +83,24 @@ async def init_db():
     print("✅ База данных инициализирована")
 
 # Функция для сохранения профиля
-async def save_profile(user_id, full_name, username, name, age, city, bio, photo):
+async def save_profile(user_id, full_name, username, name, role, age, city, bio, photo):
     try:
-        # Проверяем, есть ли уже запись
         cursor = await db.execute("SELECT users_id FROM flood WHERE users_id = ?", (user_id,))
         existing_user = await cursor.fetchone()
         
         if existing_user:
-            # Обновляем существующую запись
             await db.execute("""
                 UPDATE flood SET 
-                full_name = ?, username = ?, name = ?, age = ?, city = ?, bio = ?, photo = ?
+                full_name = ?, username = ?, name = ?, role = ?, age = ?, city = ?, bio = ?, photo = ?
                 WHERE users_id = ?
-            """, (full_name, username, name, age, city, bio, photo, user_id))
+            """, (full_name, username, name, role, age, city, bio, photo, user_id))
             action = "обновлена"
         else:
-            # Вставляем новую запись
             await db.execute("""
                 INSERT INTO flood 
-                (users_id, full_name, username, name, age, city, bio, photo) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, full_name, username, name, age, city, bio, photo))
+                (users_id, full_name, username, name, role, age, city, bio, photo) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, full_name, username, name, role, age, city, bio, photo))
             action = "создана"
         
         await db.commit()
@@ -109,7 +114,7 @@ async def save_profile(user_id, full_name, username, name, age, city, bio, photo
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-# Команда /start - главное меню
+# Команда /start
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     welcome_text = (
@@ -120,7 +125,6 @@ async def start_command(message: types.Message):
         "ℹ️ <b>Помощь</b> - показать это сообщение\n\n"
         "Выберите действие на клавиатуре ниже 👇"
     )
-    
     await message.answer(welcome_text, reply_markup=main_menu)
 
 # Команда /help
@@ -139,12 +143,10 @@ async def help_command(message: types.Message):
     )
     await message.answer(help_text, reply_markup=main_menu)
 
-# Команда для отладки (работает везде, но только для админа)
+# Команда для отладки
 @dp.message(Command("debug"))
 async def debug_profiles(message: types.Message):
-    # Проверяем права доступа
     if not is_admin(message.from_user.id):
-        # В группах не отвечаем не-админам, чтобы не засорять чат
         if message.chat.type == "private":
             await message.answer("❌ У вас нет прав доступа к этой команде.")
         return
@@ -153,23 +155,34 @@ async def debug_profiles(message: types.Message):
         cursor = await db.execute("SELECT COUNT(*) FROM flood")
         count = await cursor.fetchone()
         
-        cursor = await db.execute("SELECT users_id, name, age, city FROM flood")
+        cursor = await db.execute("SELECT users_id, name, role, age, city FROM flood ORDER BY created_at DESC")
         profiles = await cursor.fetchall()
         
-        result = f"📊 <b>Статистика базы данных:</b>\n\n"
-        result += f"📈 Всего анкет: {count[0]}\n\n"
+        result = f"📊 <b>Статистика базы данных</b>\n\n"
+        result += f"📈 Всего анкет: <b>{count[0]}</b>\n\n"
         
         if profiles:
-            result += "<b>Список анкет:</b>\n"
-            for user_id, name, age, city in profiles:
-                result += f"👤 ID: {user_id}, {name}, {age} лет, {city}\n"
-        else:
-            result += "Анкет нет в базе данных"
+            result += "<b>📋 Список анкет:</b>\n"
+            result += "─" * 40 + "\n"
             
-        await message.answer(result)
+            for i, (user_id, name, role, age, city) in enumerate(profiles, 1):
+                result += f"#{i:02d} │ ID: {user_id}\n"
+                result += f"    │ 👤 {name}\n"
+                result += f"    │ 🎭 {role}\n"
+                result += f"    │ 🎂 {age} лет │ 🏙️ {city}\n"
+                
+                if i < len(profiles):
+                    result += "    ├" + "─" * 38 + "\n"
+                else:
+                    result += "    └" + "─" * 38 + "\n"
+                    
+        else:
+            result += "📭 Анкет нет в базе данных"
+            
+        await message.answer(f"<pre>{result}</pre>")
         
     except Exception as e:
-        await message.answer(f"Ошибка при получении данных: {e}")
+        await message.answer(f"❌ Ошибка при получении данных: {e}")
 
 # Кнопка "Создать анкету"
 @dp.message(F.text == "📝 Создать анкету")
@@ -180,16 +193,6 @@ async def start_anketa(message: types.Message, state: FSMContext):
         reply_markup=cancel_menu
     )
     await state.set_state(ProfileStates.waiting_name)
-
-# Кнопка "Моя анкета"
-@dp.message(F.text == "👤 Моя анкета")
-async def my_profile_button(message: types.Message):
-    await show_profile(message)
-
-# Кнопка "Найти анкеты"
-@dp.message(F.text == "🔍 Найти анкеты")
-async def search_profiles_button(message: types.Message):
-    await search_profiles(message)
 
 # Обработчик отмены
 @dp.message(F.text == "❌ Отмена")
@@ -206,10 +209,30 @@ async def process_name(message: types.Message, state: FSMContext):
         return
     
     await state.update_data(name=name)
-    await message.answer("Сколько вам лет?")
+    await message.answer(
+        "🎭 Напишите вашу роль (например: Разработчик, Дизайнер, Студент и т.д.):",
+        reply_markup=cancel_menu
+    )
+    await state.set_state(ProfileStates.waiting_role)
+
+# Шаг 2: Роль
+@dp.message(ProfileStates.waiting_role)
+async def process_role(message: types.Message, state: FSMContext):
+    role = message.text.strip()
+    
+    if role == "❌ Отмена":
+        await cancel_anketa(message, state)
+        return
+        
+    if len(role) < 2:
+        await message.answer("Роль должна содержать минимум 2 символа. Попробуйте еще раз:")
+        return
+    
+    await state.update_data(role=role)
+    await message.answer("Сколько вам лет?", reply_markup=cancel_menu)
     await state.set_state(ProfileStates.waiting_age)
 
-# Шаг 2: Возраст
+# Шаг 3: Возраст
 @dp.message(ProfileStates.waiting_age)
 async def process_age(message: types.Message, state: FSMContext):
     if not message.text.isdigit():
@@ -225,7 +248,7 @@ async def process_age(message: types.Message, state: FSMContext):
     await message.answer("Из какого вы города?")
     await state.set_state(ProfileStates.waiting_city)
 
-# Шаг 3: Город
+# Шаг 4: Город
 @dp.message(ProfileStates.waiting_city)
 async def process_city(message: types.Message, state: FSMContext):
     city = message.text.strip()
@@ -237,7 +260,7 @@ async def process_city(message: types.Message, state: FSMContext):
     await message.answer("Расскажите о себе (интересы, хобби, увлечения и т.д.):")
     await state.set_state(ProfileStates.waiting_bio)
 
-# Шаг 4: О себе
+# Шаг 5: О себе
 @dp.message(ProfileStates.waiting_bio)
 async def process_bio(message: types.Message, state: FSMContext):
     bio = message.text.strip()
@@ -252,23 +275,20 @@ async def process_bio(message: types.Message, state: FSMContext):
     await message.answer("📸 Отлично! Теперь отправьте ваше фото:")
     await state.set_state(ProfileStates.waiting_photo)
 
-# Шаг 5: Фото и сохранение в БД
+# Шаг 6: Фото и сохранение
 @dp.message(ProfileStates.waiting_photo, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     try:
-        # Получаем данные из состояния
         user_data = await state.get_data()
-        
-        # Сохраняем информацию о фото (file_id)
         photo = message.photo[-1]
         photo_file_id = photo.file_id
         
-        # Сохраняем в базу данных
         success, action = await save_profile(
             message.from_user.id,
             message.from_user.full_name,
             message.from_user.username,
             user_data['name'],
+            user_data['role'],
             user_data['age'],
             user_data['city'],
             user_data['bio'],
@@ -276,135 +296,92 @@ async def process_photo(message: types.Message, state: FSMContext):
         )
         
         if success:
-            # Показываем результат пользователю
             await message.answer_photo(
                 photo=photo_file_id,
                 caption=f"✅ Анкета успешно {action}!\n\n"
                        f"👤 <b>Имя:</b> {user_data['name']}\n"
+                       f"🎭 <b>Роль:</b> {user_data['role']}\n"
                        f"🎂 <b>Возраст:</b> {user_data['age']}\n"
                        f"🏙️ <b>Город:</b> {user_data['city']}\n"
-                       f"📝 <b>О себе:</b> {user_data['bio']}\n\n"
-                       f"Чтобы посмотреть свою анкету, нажмите «👤 Моя анкета»",
+                       f"📝 <b>О себе:</b> {user_data['bio']}",
                 reply_markup=main_menu
             )
-            
             await state.clear()
         else:
-            await message.answer(
-                f"❌ Ошибка при сохранении анкеты: {action}\n\nПопробуйте еще раз.",
-                reply_markup=main_menu
-            )
+            await message.answer(f"❌ Ошибка: {action}", reply_markup=main_menu)
             await state.clear()
         
     except Exception as e:
-        print(f"❌ Общая ошибка при сохранении анкеты: {e}")
-        await message.answer(
-            f"❌ Произошла непредвиденная ошибка. Попробуйте начать заново.",
-            reply_markup=main_menu
-        )
+        await message.answer("❌ Ошибка. Попробуйте снова.", reply_markup=main_menu)
         await state.clear()
 
-# Если отправили не фото
-@dp.message(ProfileStates.waiting_photo)
-async def process_photo_invalid(message: types.Message):
-    await message.answer("Пожалуйста, отправьте фото:")
-
-# Команда для просмотра своей анкеты
+# Просмотр своей анкеты
+@dp.message(F.text == "👤 Моя анкета")
 @dp.message(Command("myprofile"))
 async def show_profile(message: types.Message):
     try:
-        cursor = await db.execute(
-            "SELECT * FROM flood WHERE users_id = ?", 
-            (message.from_user.id,)
-        )
+        cursor = await db.execute("SELECT * FROM flood WHERE users_id = ?", (message.from_user.id,))
         profile = await cursor.fetchone()
         
         if profile:
-            users_id, full_name, username, name, age, city, bio, photo, created_at = profile
-            
+            users_id, full_name, username, name, role, age, city, bio, photo, created_at = profile
             await message.answer_photo(
                 photo=photo,
                 caption=f"📋 <b>Ваша анкета:</b>\n\n"
                        f"👤 <b>Имя:</b> {name}\n"
+                       f"🎭 <b>Роль:</b> {role}\n"
                        f"🎂 <b>Возраст:</b> {age}\n"
                        f"🏙️ <b>Город:</b> {city}\n"
-                       f"📝 <b>О себе:</b> {bio}\n\n"
-                       f"🕐 <b>Создана:</b> {created_at}",
+                       f"📝 <b>О себе:</b> {bio}",
                 reply_markup=main_menu
             )
         else:
-            await message.answer(
-                "У вас еще нет анкеты. Создайте её, нажав «📝 Создать анкету»",
-                reply_markup=main_menu
-            )
+            await message.answer("У вас нет анкеты. Создайте её!", reply_markup=main_menu)
             
     except Exception as e:
-        print(f"❌ Ошибка при загрузке анкеты: {e}")
-        await message.answer(f"Ошибка при загрузке анкеты: {e}")
+        await message.answer(f"Ошибка: {e}")
 
-# Команда для поиска анкет
+# Поиск анкет
+@dp.message(F.text == "🔍 Найти анкеты")
 @dp.message(Command("search"))
 async def search_profiles(message: types.Message):
     try:
         cursor = await db.execute(
-            "SELECT name, age, city, bio, photo FROM flood WHERE users_id != ? LIMIT 5",
+            "SELECT name, role, age, city, bio, photo FROM flood WHERE users_id != ? LIMIT 3",
             (message.from_user.id,)
         )
         profiles = await cursor.fetchall()
         
         if profiles:
-            for name, age, city, bio, photo in profiles:
+            for name, role, age, city, bio, photo in profiles:
                 bio_preview = bio[:100] + "..." if len(bio) > 100 else bio
-                caption = f"🔍 <b>Найдена анкета:</b>\n\n" \
-                         f"👤 <b>Имя:</b> {name}\n" \
-                         f"🎂 <b>Возраст:</b> {age}\n" \
-                         f"🏙️ <b>Город:</b> {city}\n" \
-                         f"📝 <b>О себе:</b> {bio_preview}"
-                
-                await message.answer_photo(
-                    photo=photo,
-                    caption=caption
+                caption = (
+                    f"🔍 <b>Найдена анкета:</b>\n\n"
+                    f"👤 <b>Имя:</b> {name}\n"
+                    f"🎭 <b>Роль:</b> {role}\n" 
+                    f"🎂 <b>Возраст:</b> {age}\n"
+                    f"🏙️ <b>Город:</b> {city}\n"
+                    f"📝 <b>О себе:</b> {bio_preview}"
                 )
+                await message.answer_photo(photo=photo, caption=caption)
         else:
-            await message.answer(
-                "Пока нет других анкет или вы единственный пользователь.",
-                reply_markup=main_menu
-            )
+            await message.answer("Пока нет других анкет.", reply_markup=main_menu)
             
     except Exception as e:
-        await message.answer(f"Ошибка при поиске: {e}")
+        await message.answer(f"Ошибка: {e}")
 
-# Обработчик для любых других сообщений
+# Обработчик других сообщений
 @dp.message()
 async def other_messages(message: types.Message):
-    # Игнорируем сообщения в группах, если это не команда
     if message.chat.type != "private":
         return
-        
-    await message.answer(
-        "Используйте кнопки меню для навигации:\n\n"
-        "📝 <b>Создать анкету</b> - заполнить информацию о себе\n"
-        "👤 <b>Моя анкета</b> - посмотреть свою анкету\n"
-        "🔍 <b>Найти анкеты</b> - посмотреть анкеты других\n"
-        "ℹ️ <b>Помощь</b> - показать справку",
-        reply_markup=main_menu
-    )
+    await message.answer("Используйте кнопки меню для навигации", reply_markup=main_menu)
 
 # Запуск бота
 async def main():
-    # Инициализация базы данных при старте
     await init_db()
-    
-    try:
-        print("🤖 Бот запущен...")
-        await dp.start_polling(bot)
-    except Exception as e:
-        print(f"❌ Ошибка при запуске бота: {e}")
-    finally:
-        # Закрываем соединение с БД при завершении
-        if db:
-            await db.close()
-        await bot.session.close()
+    print("🤖 Бот запущен...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
